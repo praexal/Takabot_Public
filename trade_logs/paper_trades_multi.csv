@@ -1,0 +1,2 @@
+date,entry_time,exit_time,symbol,token,qty,entry,exit,prev_rsi5,live_rsi5,vwap,volume,ema9,ema20,atr,dist_vwap,exit_reason,gross_pnl,net_pnl,highest_price,m_value,duration_sec
+2026-04-27,2026-04-27 10:30:57,2026-04-27 10:31:27,NIFTY28APR26P24150,72270,65,159.45,161.5,46.87,60.13,141.91,19751875.0,144.45,152.9,22.98,17.54,SL_HIT,133.25,89.87,161.95,2.0,30

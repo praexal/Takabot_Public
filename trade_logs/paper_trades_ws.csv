@@ -1,0 +1,2 @@
+date,entry_time,exit_time,symbol,token,qty,entry,exit,reason,gross,net,highest,m,dur_sec
+2026-04-27,2026-04-27 11:08:36,2026-04-27 11:08:46,NIFTY28APR26P24150,72270,65,157.4,159.43,SL_HIT,131.95,89.0,160.4,1.98,10

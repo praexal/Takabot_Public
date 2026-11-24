@@ -1,0 +1,1 @@
+date,entry_time,strategy,symbol,token,qty,spot_high,spot_low,opening_gap,soft_entry,soft_exit,soft_reason,soft_gross,soft_net,soft_duration,hard_entry,hard_exit,hard_reason,hard_gross,hard_net,hard_duration,lcl_entry,lcl_exit,lcl_reason,lcl_gross,lcl_net,lcl_duration

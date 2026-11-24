@@ -1,0 +1,86 @@
+name: Run Shoonya Bot
+
+on:
+  schedule:
+    - cron: '30 3 * * 1-5' # 9:00 AM IST (Mon-Fri)
+  workflow_dispatch:
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 360
+
+    env:
+      TZ: Asia/Kolkata
+      PYTHONUNBUFFERED: "1"
+      ZERO_IP_KEY: ${{ secrets.ZERO_IP_KEY }}
+      SHOONYA_CLIENT_ID: ${{ secrets.SHOONYA_CLIENT_ID }}
+      SHOONYA_USER_ID: ${{ secrets.SHOONYA_USER_ID }}
+      SHOONYA_PASSWORD: ${{ secrets.SHOONYA_PASSWORD }}
+      SHOONYA_TOTP_SECRET: ${{ secrets.SHOONYA_TOTP_SECRET }}
+      SHOONYA_SECRET_CODE: ${{ secrets.SHOONYA_SECRET_CODE }}
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyyaml pandas numpy pyzmq selenium pyotp requests python-dotenv NorenRestApiOAuth
+          pip install --upgrade --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git
+
+      - name: Generate cred.yml from Secrets
+        run: |
+          cat << EOF > cred.yml
+          oauth_url: "${{ secrets.SHOONYA_OAUTH_URL }}"
+          client_id: "${{ secrets.SHOONYA_CLIENT_ID }}"
+          Secret_Code: "${{ secrets.SHOONYA_SECRET_CODE }}"
+          UID: "${{ secrets.SHOONYA_USER_ID }}"
+          EOF
+
+      - name: Run Login & Start Bot
+        run: |
+          python Login.py
+          rm -f master_ready.flag
+          
+          python masterbotauto.py &
+
+          echo "Waiting for master_ready.flag..."
+          while [ ! -f master_ready.flag ]; do
+            sleep 2
+          done
+
+          python TV.py &
+          python OB.py &
+          sleep 10
+
+          python datalogger.py &
+          python poc3slave.py > /dev/null &
+          python obslave.py > /dev/null &
+          python orb.py > /dev/null &
+
+          # Keep bots, datalogger, and feeds running until 2:50 PM IST
+          while [ "$(date +%H%M)" -lt "1450" ]; do
+            sleep 30
+          done
+          echo "2:50 PM IST reached. Stopping all processes..."
+          kill $(jobs -p) 2>/dev/null || true
+
+      - name: Commit and Push Trade Logs
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -d "trade_logs" ]; then
+            git add trade_logs/
+            git diff --staged --quiet || (git commit -m "Auto-save trade logs" && git push)
+          fi

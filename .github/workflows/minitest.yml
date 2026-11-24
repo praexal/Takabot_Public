@@ -1,0 +1,32 @@
+name: Test ORB Telegram
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-orb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      TZ: Asia/Kolkata
+      PYTHONUNBUFFERED: "1"
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pandas numpy pyzmq requests
+          pip install --upgrade --no-cache-dir git+https://github.com/rongardF/tvdatafeed.git
+
+      - name: Run orb.py
+        run: python orb.py
