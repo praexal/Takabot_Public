@@ -1,1 +1,2 @@
 date,entry_time,strategy,symbol,token,qty,spot_high,spot_low,opening_gap,soft_entry,soft_exit,soft_reason,soft_gross,soft_net,soft_duration,hard_entry,hard_exit,hard_reason,hard_gross,hard_net,hard_duration,lcl_entry,lcl_exit,lcl_reason,lcl_gross,lcl_net,lcl_duration
+2026-11-25,2026-11-25 09:37:52,ORB_920,NIFTY01DEC26C26150,47906,65,25756.0,25619.0,292.1,100.7,95.73,SOFT_SL_HIT,-323.05,-353.48,18,100.7,95.73,HARD_SL_HIT,-323.05,-353.48,18,100.7,95.45,LCL_SL_HIT,-341.25,-371.65,18
