@@ -1,4 +1,4 @@
-﻿import csv
+import csv
 import os
 import time
 import threading
@@ -8,9 +8,9 @@ import tempfile
 import sys
 import zmq
 import re
+import requests
 from tvDatafeed import TvDatafeed, Interval
 import numpy as np
-import requests
 
 from datetime import datetime
 
@@ -25,10 +25,15 @@ STATE_FOLDER = "temp_state"
 TRADE_CSV = os.path.join(LOG_FOLDER, "orb_920_trades.csv")
 STATE_FILE = os.path.join(STATE_FOLDER, "orb_live_state.json")
 
+# Telegram Credentials (from GitHub Secrets / Env)
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
+TG_CHAT_ID   = os.getenv("TG_CHAT_ID", "")
+IS_CI        = os.getenv("GITHUB_ACTIONS") == "true"
+
 # Timings
 ORB_MARKTIME = "09:20"   
-ENTRY_END    = "13:00"   
-FORCE_EXIT   = "14:20"   
+ENTRY_END    = "15:00"   
+FORCE_EXIT   = "15:20"   
 
 # Delays
 EXIT_LOOP_DELAY  = 0.05
@@ -57,10 +62,6 @@ CYAN = "\033[96m"
 YELLOW = "\033[93m"
 RESET = "\033[0m"
 
-#Telegram ID
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "YOUR_BOT_TOKEN")
-TG_CHAT_ID   = os.getenv("TG_CHAT_ID", "YOUR_CHAT_ID")
-
 # ============================================================
 # STATE STORAGE
 # ============================================================
@@ -80,7 +81,7 @@ active_ce_token = None
 active_pe_token = None
 symbols = []
 
-tv = TvDatafeed()
+tv = None
 
 trades = {}
 trade_done_today = False
@@ -89,6 +90,7 @@ terminal_logs = []
 
 lock = threading.Lock()
 spot_lock = threading.Lock()
+restart_requested = threading.Event()
 
 cached_csv_stats = {
     "today": {**{l: {"real_net": 0.0, "wins": 0, "losses": 0} for l in LEGS}, "completed": 0},
@@ -96,7 +98,7 @@ cached_csv_stats = {
 }
 
 # ============================================================
-# HELPER FUNCTIONS (1:1 from poc3slave)
+# HELPER FUNCTIONS
 # ============================================================
 def init_terminal():
     if os.name == 'nt':
@@ -112,12 +114,89 @@ def tstr(): return now().strftime("%Y-%m-%d %H:%M:%S")
 def hm(): return now().strftime("%H:%M")
 def round2(x): return round(float(x), 2) if x is not None else 0.0
 
-def log(msg):
+def send_telegram(msg, sync=False):
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return
+    def _post():
+        try:
+            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+            requests.post(
+                url,
+                json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+                proxies={"http": None, "https": None},
+                timeout=5
+            )
+        except Exception as e:
+            print(f"Telegram error: {e}", flush=True)
+    if sync:
+        _post()
+    else:
+        threading.Thread(target=_post, daemon=True).start()
+
+def telegram_command_loop():
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
+    offset = None
+
+    # Flush old messages on startup to avoid restart loops
+    try:
+        r = requests.get(
+            url, params={"offset": -1}, proxies={"http": None, "https": None}, timeout=10
+        ).json()
+        if r.get("ok") and r.get("result"):
+            offset = r["result"][-1]["update_id"] + 1
+    except Exception:
+        pass
+
+    while not restart_requested.is_set():
+        try:
+            params = {"timeout": 20}
+            if offset is not None:
+                params["offset"] = offset
+            r = requests.get(
+                url, params=params, proxies={"http": None, "https": None}, timeout=25
+            ).json()
+            if r.get("ok"):
+                for update in r.get("result", []):
+                    offset = update["update_id"] + 1
+                    msg = update.get("message", {})
+                    chat_id = str(msg.get("chat", {}).get("id", ""))
+                    text = msg.get("text", "").strip().lower()
+
+                    if chat_id == str(TG_CHAT_ID) and text == "/restart":
+                        try:
+                            requests.get(
+                                url, params={"offset": offset},
+                                proxies={"http": None, "https": None}, timeout=5
+                            )
+                        except Exception:
+                            pass
+                        send_telegram(f"[{tstr()}] 🔄 Restarting orb.py...", sync=True)
+                        restart_requested.set()
+                        return
+        except Exception:
+            time.sleep(5)
+
+def connect_tv():
+    global tv
+    try:
+        tv = TvDatafeed()
+        return True
+    except Exception as e:
+        log(f"TradingView connect error: {e}")
+        tv = None
+        return False
+
+def log(msg, notify=False):
     global terminal_logs
     formatted = f"[{tstr()}] {msg}"
     terminal_logs.append(formatted)
     terminal_logs = terminal_logs[-8:]
-    if not ui_active: print(formatted)
+    if not ui_active:
+        print(formatted, flush=True)
+    if notify:
+        send_telegram(formatted)
 
 def save_live_state():
     try:
@@ -190,7 +269,7 @@ def zmq_subscriber_loop():
     sub_socket.setsockopt(zmq.SUBSCRIBE, b"SNAPSHOT")
     sub_socket.setsockopt(zmq.SUBSCRIBE, b"SPOT_SNAPSHOT")
     
-    while True:
+    while not restart_requested.is_set():
         try:
             topic, payload_bytes = sub_socket.recv_multipart()
             msg = json.loads(payload_bytes.decode('utf-8'))
@@ -203,7 +282,7 @@ def zmq_subscriber_loop():
         except Exception: time.sleep(0.1)
 
 # ============================================================
-# ORB DYNAMIC SELECTION (1:1 REGEX from poc3slave)
+# ORB DYNAMIC SELECTION
 # ============================================================
 def select_contracts_closest_to_100():
     global active_ce_token, active_pe_token, options_selected
@@ -231,8 +310,8 @@ def select_contracts_closest_to_100():
         active_pe_token = min(pe_candidates, key=lambda x: x[1])[0]
         options_selected = True
         
-        log(f"Selected CE: {market_state[active_ce_token]['symbol']} (@{market_state[active_ce_token]['ltp']})")
-        log(f"Selected PE: {market_state[active_pe_token]['symbol']} (@{market_state[active_pe_token]['ltp']})")
+        log(f"Selected CE: {market_state[active_ce_token]['symbol']} (@{market_state[active_ce_token]['ltp']})", notify=True)
+        log(f"Selected PE: {market_state[active_pe_token]['symbol']} (@{market_state[active_pe_token]['ltp']})", notify=True)
 
 # ============================================================
 # ORDER EXECUTION ENGINE (SOFT, HARD, LCL)
@@ -284,7 +363,7 @@ def open_trade(target_token, side):
             }
         }
     trade_done_today = True
-    log(f"🚀 BREAKOUT ENTRY: bought {snap['symbol']} at {entry_px}")
+    log(f"🚀 BREAKOUT ENTRY: bought {snap['symbol']} at {entry_px}", notify=True)
 
 def finish_leg(tr, leg, reason, px):
     c = tr[leg]
@@ -311,6 +390,13 @@ def close_trade_registry(token):
     ]
     with open(TRADE_CSV, "a", newline="") as f: csv.writer(f).writerow(row)
     with lock: del trades[token]
+
+    lines = [f"<b>{tr['symbol']} ({tr['side']})</b>"]
+    for l in LEGS:
+        net = float(tr[l]["net"] or 0.0)
+        lines.append(f"{l} = {net:+.2f}")
+    send_telegram("\n".join(lines))
+
     log(f"✨ Strategy Evaluation complete for {tr['symbol']}.")
     refresh_historical_csv_cache()
 
@@ -361,12 +447,27 @@ def manage_active_trade(token):
 # PROCESSING LOOPS
 # ============================================================
 def scanner_loop():
-    global orb_high, orb_low, spot_gap, orb_initialized, options_selected
+    global orb_high, orb_low, spot_gap, orb_initialized, options_selected, tv
+    tv_fail_count = 0
     
-    while True:
+    while not restart_requested.is_set():
         current_time_str = hm()
+
+        # 1. Handle Intraday EOD Stop Execution
+        if current_time_str >= FORCE_EXIT:
+            for tk in list(trades.keys()):
+                with lock:
+                    tr = trades[tk]
+                    ltp = float(market_state[tk]["ltp"])
+                    for l in LEGS:
+                        finish_leg(tr, l, "EOD_FORCE", ltp)
+                close_trade_registry(tk)
+            log("Market close threshold met. Bot offline.")
+            send_telegram(f"[{tstr()}] Market close threshold met. Bot offline.", sync=True)
+            time.sleep(2.0)
+            os._exit(0)
         
-        # 1. Fetch the strict 9:15 AM candle from TradingView
+        # 2. Fetch the strict 9:15 AM candle from TradingView (with auto-reconnect)
         if not orb_initialized:
             if "06:00" <= current_time_str < "09:20":
                 log("Waiting for 9:20 AM to pull TradingView ORB data...")
@@ -376,6 +477,14 @@ def scanner_loop():
             if current_time_str == "09:20" and now().second < 5:
                 time.sleep(1.0)
                 continue
+
+            if tv is None:
+                if not connect_tv():
+                    tv_fail_count += 1
+                    if tv_fail_count == 1:
+                        send_telegram(f"[{tstr()}] ⚠️ TradingView connection failed. Auto-reconnecting...")
+                    time.sleep(5.0)
+                    continue
                 
             try:
                 df = tv.get_hist(symbol='NIFTY', exchange='NSE', interval=Interval.in_5_minute, n_bars=50)
@@ -397,33 +506,33 @@ def scanner_loop():
                             spot_gap = 0.0
                             
                         orb_initialized = True
-                        log(f"🎯 TV ORB Locked -> High: {orb_high} | Low: {orb_low} | Gap: {spot_gap}")
+                        tv_fail_count = 0
+                        log(f"🎯 TV ORB Locked -> High: {orb_high} | Low: {orb_low} | Gap: {spot_gap}", notify=True)
                     else:
                         log("TradingView 9:15 candle not found yet. Retrying...")
-                        time.sleep(2.0)
+                        time.sleep(3.0)
+                else:
+                    tv_fail_count += 1
+                    log("TradingView returned no data. Reconnecting in 5s...")
+                    if tv_fail_count == 1:
+                        send_telegram(f"[{tstr()}] ⚠️ TradingView disconnected (no data). Auto-reconnecting...")
+                    tv = None
+                    time.sleep(5.0)
             except Exception as e:
-                log(f"TradingView fetch error: {e}")
-                time.sleep(2.0)
+                tv_fail_count += 1
+                log(f"TradingView fetch error: {e}. Reconnecting in 5s...")
+                if tv_fail_count == 1:
+                    send_telegram(f"[{tstr()}] ⚠️ TradingView error: {e}. Auto-reconnecting...")
+                tv = None
+                time.sleep(5.0)
                 
             continue
 
-        # 2. Select options contracts near Rs 100 once ORB range is set
+        # 3. Select options contracts near Rs 100 once ORB range is set
         if orb_initialized and not options_selected:
             select_contracts_closest_to_100()
             time.sleep(1.0)
             continue
-
-        # 3. Handle Intraday EOD Stop Execution
-        if current_time_str >= FORCE_EXIT:
-            for tk in list(trades.keys()):
-                with lock:
-                    tr = trades[tk]
-                    ltp = float(market_state[tk]["ltp"])
-                    for l in LEGS:
-                        finish_leg(tr, l, "EOD_FORCE", ltp)
-                close_trade_registry(tk)
-            log("Market close threshold met. Bot offline.")
-            os._exit(0)
 
         # 4. Watch for Spot Breakout Signals ALL DAY via Shoonya ZeroMQ stream
         if orb_initialized and options_selected and not trade_done_today:
@@ -446,7 +555,7 @@ def scanner_loop():
         time.sleep(IDLE_SLEEP)
 
 def exit_loop():
-    while True:
+    while not restart_requested.is_set():
         for tk in list(trades.keys()):
             try: manage_active_trade(tk)
             except Exception: pass
@@ -491,7 +600,7 @@ def get_live_metrics():
     return stats
 
 def dashboard_loop():
-    while True:
+    while not restart_requested.is_set():
         stats = get_live_metrics()
         with spot_lock:
             spot_ltp = market_state_spot.get(SPOT_TOKEN, {}).get("ltp", "N/A")
@@ -526,37 +635,6 @@ def dashboard_loop():
         time.sleep(DASHBOARD_DELAY)
 
 # ============================================================
-# Telegram Bot
-# ============================================================
-
-def send_telegram(msg, sync=False):
-    if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        return
-    def _post():
-        try:
-            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-            requests.post(
-                url,
-                json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "HTML"},
-                proxies={"http": None, "https": None},
-                timeout=5
-            )
-        except Exception as e:
-            print(f"Telegram error: {e}", flush=True)
-    if sync:
-        _post()
-    else:
-        threading.Thread(target=_post, daemon=True).start()
-        
-def log(msg, notify=False):
-    global terminal_logs
-    formatted = f"[{tstr()}] {msg}"
-    terminal_logs.append(formatted)
-    terminal_logs = terminal_logs[-8:]
-    if not ui_active: print(formatted)
-    if notify: send_telegram(formatted)
-
-# ============================================================
 # SYSTEM MAIN ENTRY POINT
 # ============================================================
 def main():
@@ -564,18 +642,18 @@ def main():
     init_csv()
     send_telegram(f"[{tstr()}] ✅ orb.py started.", sync=True)
     
-    print("Binding communication vectors to Master Broker Engine...")
+    print("Binding communication vectors to Master Broker Engine...", flush=True)
     req_socket.connect(f"tcp://{MASTER_IP}:{MASTER_REP_PORT}")
     
     resp = send_master_request({"cmd": "GET_SYMBOLS"})
     if resp and "symbols" in resp:
         symbols = resp["symbols"]
-        print(f"Verified connection. Monitoring {len(symbols)} dynamic options instruments.")
+        print(f"Verified connection. Monitoring {len(symbols)} dynamic options instruments.", flush=True)
     else:
-        print("❌ Handshake failure: Confirm that masterbotauto.py is running.")
+        print("❌ Handshake failure: Confirm that masterbotauto.py is running.", flush=True)
         return
 
-    print("Pre-seeding environment structures...")
+    print("Pre-seeding environment structures...", flush=True)
     for s in symbols:
         tk = s["token"]
         snap = send_master_request({"cmd": "GET_SNAPSHOT", "token": tk})
@@ -586,19 +664,29 @@ def main():
 
     send_telegram(f"[{tstr()}] ✅ Bot active.")
 
-    init_terminal()
-    ui_active = True
-    sys.stdout.write(ENTER_ALT_SCREEN + CLEAR_SCREEN + HIDE_CURSOR); sys.stdout.flush()
+    if not IS_CI:
+        init_terminal()
+        ui_active = True
+        sys.stdout.write(ENTER_ALT_SCREEN + CLEAR_SCREEN + HIDE_CURSOR); sys.stdout.flush()
     
     try:
+        threading.Thread(target=telegram_command_loop, daemon=True).start()
         threading.Thread(target=zmq_subscriber_loop, daemon=True).start()
         threading.Thread(target=exit_loop, daemon=True).start()
         threading.Thread(target=scanner_loop, daemon=True).start()
-        dashboard_loop()
+        if IS_CI:
+            while not restart_requested.is_set():
+                save_live_state()
+                time.sleep(DASHBOARD_DELAY)
+        else:
+            dashboard_loop()
     except KeyboardInterrupt: pass
     finally:
-        sys.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN); sys.stdout.flush()
-        print(f"{YELLOW}ORB Engine disconnected smoothly.{RESET}")
+        if not IS_CI:
+            sys.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN); sys.stdout.flush()
+        if restart_requested.is_set():
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        print(f"{YELLOW}ORB Engine disconnected smoothly.{RESET}", flush=True)
 
 if __name__ == "__main__":
     main()
