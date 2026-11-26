@@ -48,32 +48,9 @@ jobs:
           EOF
 
       - name: Run Login & Start Bot
-        run: |
-          python Login.py
-          rm -f master_ready.flag
-          
-          python masterbotauto.py &
-
-          echo "Waiting for master_ready.flag..."
-          while [ ! -f master_ready.flag ]; do
-            sleep 2
-          done
-
-          python TV.py &
-          python OB.py &
-          sleep 10
-
-          python datalogger.py &
-          python poc3slave.py > /dev/null &
-          python obslave.py > /dev/null &
-          python orb.py > /dev/null &
-
-          # Keep bots, datalogger, and feeds running until 2:50 PM IST
-          while [ "$(date +%H%M)" -lt "1450" ]; do
-            sleep 30
-          done
-          echo "2:50 PM IST reached. Stopping all processes..."
-          kill $(jobs -p) 2>/dev/null || true
+       run: |
+         python Login.py
+         python botmanager.py
 
       - name: Commit and Push Trade Logs
         if: always()
