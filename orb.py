@@ -90,7 +90,6 @@ terminal_logs = []
 
 lock = threading.Lock()
 spot_lock = threading.Lock()
-restart_requested = threading.Event()
 
 cached_csv_stats = {
     "today": {**{l: {"real_net": 0.0, "wins": 0, "losses": 0} for l in LEGS}, "completed": 0},
@@ -132,51 +131,6 @@ def send_telegram(msg, sync=False):
         _post()
     else:
         threading.Thread(target=_post, daemon=True).start()
-
-def telegram_command_loop():
-    if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates"
-    offset = None
-
-    # Flush old messages on startup to avoid restart loops
-    try:
-        r = requests.get(
-            url, params={"offset": -1}, proxies={"http": None, "https": None}, timeout=10
-        ).json()
-        if r.get("ok") and r.get("result"):
-            offset = r["result"][-1]["update_id"] + 1
-    except Exception:
-        pass
-
-    while not restart_requested.is_set():
-        try:
-            params = {"timeout": 20}
-            if offset is not None:
-                params["offset"] = offset
-            r = requests.get(
-                url, params=params, proxies={"http": None, "https": None}, timeout=25
-            ).json()
-            if r.get("ok"):
-                for update in r.get("result", []):
-                    offset = update["update_id"] + 1
-                    msg = update.get("message", {})
-                    chat_id = str(msg.get("chat", {}).get("id", ""))
-                    text = msg.get("text", "").strip().lower()
-
-                    if chat_id == str(TG_CHAT_ID) and text == "/restart":
-                        try:
-                            requests.get(
-                                url, params={"offset": offset},
-                                proxies={"http": None, "https": None}, timeout=5
-                            )
-                        except Exception:
-                            pass
-                        send_telegram(f"[{tstr()}] 🔄 Restarting orb.py...", sync=True)
-                        restart_requested.set()
-                        return
-        except Exception:
-            time.sleep(5)
 
 def connect_tv():
     global tv
@@ -269,7 +223,7 @@ def zmq_subscriber_loop():
     sub_socket.setsockopt(zmq.SUBSCRIBE, b"SNAPSHOT")
     sub_socket.setsockopt(zmq.SUBSCRIBE, b"SPOT_SNAPSHOT")
     
-    while not restart_requested.is_set():
+    while True:
         try:
             topic, payload_bytes = sub_socket.recv_multipart()
             msg = json.loads(payload_bytes.decode('utf-8'))
@@ -450,7 +404,7 @@ def scanner_loop():
     global orb_high, orb_low, spot_gap, orb_initialized, options_selected, tv
     tv_fail_count = 0
     
-    while not restart_requested.is_set():
+    while True:
         current_time_str = hm()
 
         # 1. Handle Intraday EOD Stop Execution
@@ -555,7 +509,7 @@ def scanner_loop():
         time.sleep(IDLE_SLEEP)
 
 def exit_loop():
-    while not restart_requested.is_set():
+    while True:
         for tk in list(trades.keys()):
             try: manage_active_trade(tk)
             except Exception: pass
@@ -600,7 +554,7 @@ def get_live_metrics():
     return stats
 
 def dashboard_loop():
-    while not restart_requested.is_set():
+    while True:
         stats = get_live_metrics()
         with spot_lock:
             spot_ltp = market_state_spot.get(SPOT_TOKEN, {}).get("ltp", "N/A")
@@ -670,12 +624,11 @@ def main():
         sys.stdout.write(ENTER_ALT_SCREEN + CLEAR_SCREEN + HIDE_CURSOR); sys.stdout.flush()
     
     try:
-        threading.Thread(target=telegram_command_loop, daemon=True).start()
         threading.Thread(target=zmq_subscriber_loop, daemon=True).start()
         threading.Thread(target=exit_loop, daemon=True).start()
         threading.Thread(target=scanner_loop, daemon=True).start()
         if IS_CI:
-            while not restart_requested.is_set():
+            while True:
                 save_live_state()
                 time.sleep(DASHBOARD_DELAY)
         else:
@@ -684,8 +637,6 @@ def main():
     finally:
         if not IS_CI:
             sys.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN); sys.stdout.flush()
-        if restart_requested.is_set():
-            os.execv(sys.executable, [sys.executable] + sys.argv)
         print(f"{YELLOW}ORB Engine disconnected smoothly.{RESET}", flush=True)
 
 if __name__ == "__main__":
