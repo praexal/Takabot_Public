@@ -1,4 +1,4 @@
-name: Run Shoonya Bot
+Name: Run Shoonya Bot
 
 on:
   schedule:
