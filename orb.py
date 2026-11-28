@@ -14,6 +14,7 @@ from datetime import datetime
 # ============================================================
 LOT_SIZE = 65
 TARGET_PREMIUM = 100.0
+ONE_TRADE_LIMIT = False
 
 LOG_FOLDER = "trade_logs"
 STATE_FOLDER = "temp_state"
@@ -26,7 +27,7 @@ TG_CHAT_ID   = os.getenv("TG_CHAT_ID", "")
 
 # Timings
 ORB_MARKTIME = "09:20"
-ENTRY_END    = "15:00"
+ENTRY_END    = "12:00"
 FORCE_EXIT   = "15:20"
 
 # Delays
@@ -427,8 +428,11 @@ def scanner_loop():
             continue
 
         # 4. Watch for Spot Breakout Signals via Shoonya ZeroMQ stream
-        if orb_initialized and options_selected and not trade_done_today:
-            if current_time_str > ENTRY_END:
+        with lock:
+            has_active_trade = bool(trades)
+
+        if orb_initialized and options_selected and not has_active_trade and (not ONE_TRADE_LIMIT or not trade_done_today):
+            if current_time_str >= ENTRY_END:
                 time.sleep(IDLE_SLEEP)
                 continue
 
